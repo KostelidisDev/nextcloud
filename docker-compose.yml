@@ -20,7 +20,7 @@ x-nextcloud-env: &nextcloud-env
 
 services:
   nextcloud:
-    image: nextcloud:${NEXTCLOUD_VERSION:-35}
+    image: nextcloud:${NEXTCLOUD_VERSION:-35.0.1-apache}
     container_name: nextcloud
     restart: unless-stopped
     stop_grace_period: 60s
@@ -100,7 +100,7 @@ services:
       - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
 
   cron:
-    image: nextcloud:${NEXTCLOUD_VERSION:-35}
+    image: nextcloud:${NEXTCLOUD_VERSION:-35.0.1-apache}
     container_name: nextcloud-cron
     restart: unless-stopped
     entrypoint: /cron.sh
@@ -178,7 +178,7 @@ services:
           memory: "${DB_MEMORY_RESERVATION:-256M}"
 
   redis:
-    image: redis:${REDIS_TAG:-8-alpine}
+    image: redis:${REDIS_TAG:-8.10-alpine3.23}
     container_name: nextcloud-redis
     restart: unless-stopped
     security_opt:
