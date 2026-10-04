@@ -1,0 +1,278 @@
+name: nextcloud
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+    compress: "true"
+
+x-nextcloud-env: &nextcloud-env
+  TZ: "${TZ:-Europe/Athens}"
+  POSTGRES_HOST: db
+  POSTGRES_DB_FILE: /run/secrets/postgres-db
+  POSTGRES_USER_FILE: /run/secrets/postgres-user
+  POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+  REDIS_HOST: redis
+  REDIS_HOST_PASSWORD_FILE: /run/secrets/redis-password
+  PHP_MEMORY_LIMIT: "${PHP_MEMORY_LIMIT:-1G}"
+  PHP_UPLOAD_LIMIT: "${PHP_UPLOAD_LIMIT:-16G}"
+
+services:
+  nextcloud:
+    image: nextcloud:${NEXTCLOUD_VERSION:-35}
+    container_name: nextcloud
+    restart: unless-stopped
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      <<: *nextcloud-env
+      NEXTCLOUD_TRUSTED_DOMAINS: "${DOMAIN:?DOMAIN is required}"
+      OVERWRITEPROTOCOL: https
+      OVERWRITEHOST: "${DOMAIN}"
+      OVERWRITECLIURL: "https://${DOMAIN}"
+      # Host-network Traefik connects from this network's gateway (pinned below).
+      TRUSTED_PROXIES: "${NEXTCLOUD_GATEWAY:-172.20.0.1}"
+    secrets:
+      - postgres-db
+      - postgres-user
+      - postgres-password
+      - redis-password
+    configs:
+      - source: apache-mpm
+        target: /etc/apache2/mods-available/mpm_prefork.conf
+    volumes:
+      - html:/var/www/html
+      - data:/var/www/html/data
+    networks:
+      - nextcloud
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost/status.php"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+      start_interval: 5s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # Must cover MaxRequestWorkers x typical request memory (see apache-mpm).
+          # noinspection ComposeUnknownValues
+          cpus: "${NEXTCLOUD_CPU_LIMIT:-2}"
+          # noinspection ComposeUnknownValues
+          memory: "${NEXTCLOUD_MEMORY_LIMIT:-2G}"
+          # noinspection ComposeUnknownValues
+          pids: ${NEXTCLOUD_PIDS_LIMIT:-512}
+        reservations:
+          # noinspection ComposeUnknownValues
+          memory: "${NEXTCLOUD_MEMORY_RESERVATION:-512M}"
+    labels:
+      - "traefik.enable=true"
+      # HTTP Router (TLS comes from the websecure entrypoint's wildcard default)
+      - "traefik.http.routers.nextcloud.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.nextcloud.entrypoints=websecure"
+      - "traefik.http.routers.nextcloud.service=nextcloud"
+      - "traefik.http.routers.nextcloud.middlewares=nextcloud-ipallowlist,nextcloud-dav,nextcloud-headers,nextcloud-path"
+      # HTTP Middlewares
+      - "traefik.http.middlewares.nextcloud-ipallowlist.ipallowlist.sourcerange=${IPV4_ALLOWLIST:-0.0.0.0/0},${IPV6_ALLOWLIST:-::/0}"
+      - "traefik.http.middlewares.nextcloud-dav.redirectregex.permanent=true"
+      - "traefik.http.middlewares.nextcloud-dav.redirectregex.regex=^https://(.*)/.well-known/(?:card|cal)dav"
+      - "traefik.http.middlewares.nextcloud-dav.redirectregex.replacement=https://$${1}/remote.php/dav/"
+      - "traefik.http.middlewares.nextcloud-headers.headers.stsSeconds=15552000"
+      - "traefik.http.middlewares.nextcloud-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.nextcloud-headers.headers.stsPreload=true"
+      # WebDAV puts file names in the URL path, so names containing # ? ; % or /
+      # arrive encoded (%23 %3F %3B %25 %2F). Null and backslash stay rejected.
+      - "traefik.http.middlewares.nextcloud-path.encodedcharacters.allowencodedslash=true"
+      - "traefik.http.middlewares.nextcloud-path.encodedcharacters.allowencodedpercent=true"
+      - "traefik.http.middlewares.nextcloud-path.encodedcharacters.allowencodedhash=true"
+      - "traefik.http.middlewares.nextcloud-path.encodedcharacters.allowencodedquestionmark=true"
+      - "traefik.http.middlewares.nextcloud-path.encodedcharacters.allowencodedsemicolon=true"
+      # HTTP Service
+      - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
+
+  cron:
+    image: nextcloud:${NEXTCLOUD_VERSION:-35}
+    container_name: nextcloud-cron
+    restart: unless-stopped
+    entrypoint: /cron.sh
+    environment:
+      <<: *nextcloud-env
+    secrets:
+      - postgres-db
+      - postgres-user
+      - postgres-password
+      - redis-password
+    volumes:
+      - html:/var/www/html
+      - data:/var/www/html/data
+    networks:
+      - backend
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # noinspection ComposeUnknownValues
+          cpus: "${CRON_CPU_LIMIT:-0.5}"
+          # noinspection ComposeUnknownValues
+          memory: "${CRON_MEMORY_LIMIT:-512M}"
+          # noinspection ComposeUnknownValues
+          pids: ${CRON_PIDS_LIMIT:-128}
+        reservations:
+          # noinspection ComposeUnknownValues
+          memory: "${CRON_MEMORY_RESERVATION:-128M}"
+
+  db:
+    image: postgres:${POSTGRES_TAG:-18.6-alpine}
+    container_name: nextcloud-db
+    restart: unless-stopped
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    # Docker's 64 MB default /dev/shm is too small for Postgres parallel queries.
+    shm_size: 128m
+    environment:
+      TZ: "${TZ:-Europe/Athens}"
+      POSTGRES_DB: "${POSTGRES_DB:-nextcloud}"
+      POSTGRES_USER: "${POSTGRES_USER:-nextcloud}"
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - postgres-password
+    volumes:
+      - db:/var/lib/postgresql
+    configs:
+      - source: db-init
+        target: /docker-entrypoint-initdb.d/10-public-schema.sql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 5s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # noinspection ComposeUnknownValues
+          cpus: "${DB_CPU_LIMIT:-1}"
+          # noinspection ComposeUnknownValues
+          memory: "${DB_MEMORY_LIMIT:-1G}"
+          # noinspection ComposeUnknownValues
+          pids: ${DB_PIDS_LIMIT:-256}
+        reservations:
+          # noinspection ComposeUnknownValues
+          memory: "${DB_MEMORY_RESERVATION:-256M}"
+
+  redis:
+    image: redis:${REDIS_TAG:-8-alpine}
+    container_name: nextcloud-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    environment:
+      TZ: "${TZ:-Europe/Athens}"
+    secrets:
+      - redis-password
+    configs:
+      - source: redis-conf
+        target: /usr/local/etc/redis/redis.conf
+    volumes:
+      - redis:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis-password)\" redis-cli ping | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      start_interval: 2s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          # noinspection ComposeUnknownValues
+          cpus: "${REDIS_CPU_LIMIT:-0.5}"
+          # noinspection ComposeUnknownValues
+          memory: "${REDIS_MEMORY_LIMIT:-256M}"
+          # noinspection ComposeUnknownValues
+          pids: ${REDIS_PIDS_LIMIT:-64}
+        reservations:
+          # noinspection ComposeUnknownValues
+          memory: "${REDIS_MEMORY_RESERVATION:-64M}"
+
+configs:
+  db-init:
+    # PG15+ no longer lets non-owners create tables in "public"; Nextcloud's
+    # installer creates its own oc_<admin> role, which then can't create tables.
+    content: |
+      GRANT CREATE ON SCHEMA public TO PUBLIC;
+  redis-conf:
+    content: |
+      requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      # Stay below the container limit instead of being OOM-killed (which drops
+      # every file lock at once). volatile-lru only evicts keys that have a TTL.
+      maxmemory ${REDIS_MAXMEMORY:-200mb}
+      maxmemory-policy volatile-lru
+  apache-mpm:
+    # Cap Apache workers so peak memory fits the container limit. The default
+    # of 150 workers, each allowed up to PHP_MEMORY_LIMIT, would blow past it.
+    content: |
+      <IfModule mpm_prefork_module>
+        StartServers 2
+        MinSpareServers 2
+        MaxSpareServers 6
+        MaxRequestWorkers ${NEXTCLOUD_MAX_WORKERS:-16}
+        MaxConnectionsPerChild 1000
+      </IfModule>
+
+networks:
+  nextcloud:
+    name: nextcloud
+    ipam:
+      config:
+        - subnet: ${NEXTCLOUD_SUBNET:-172.20.0.0/16}
+          gateway: ${NEXTCLOUD_GATEWAY:-172.20.0.1}
+  backend:
+    name: nextcloud-backend
+    internal: true
+
+volumes:
+  html:
+    name: nextcloud-html
+  data:
+    name: nextcloud-data
+    driver: local
+    driver_opts:
+      type: ${DATA_MOUNT_TYPE:?DATA_MOUNT_TYPE is required}
+      device: "${DATA_MOUNT_DEVICE:?DATA_MOUNT_DEVICE is required}"
+      o: "${DATA_MOUNT_O:?DATA_MOUNT_O is required}"
+  db:
+    name: nextcloud-db
+  redis:
+    name: nextcloud-redis
+
+secrets:
+  postgres-db:
+    environment: POSTGRES_DB
+  postgres-user:
+    environment: POSTGRES_USER
+  postgres-password:
+    environment: POSTGRES_PASSWORD
+  redis-password:
+    environment: REDIS_PASSWORD
