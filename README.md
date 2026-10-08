@@ -15,9 +15,11 @@ SMB/NFS share.
 
 Networks:
 
-- `nextcloud` — frontend bridge with a pinned subnet/gateway. Traefik (running on
-  the host network) reaches Nextcloud through this gateway, which is why the
-  gateway address is set as Nextcloud's trusted proxy.
+Both networks are dual-stack (IPv4 + IPv6) with subnets set in `.env`.
+
+- `nextcloud` — frontend bridge. Traefik (running on the host network) reaches
+  Nextcloud through this network's gateways, which is why both of its subnets
+  are set as Nextcloud's trusted proxies. Only Nextcloud is attached to it.
 - `nextcloud-backend` — internal network (no outbound access) shared by
   Nextcloud, cron, Postgres and Redis.
 
@@ -32,7 +34,8 @@ Volumes:
 
 ## Prerequisites
 
-- Docker Engine with Compose v2.
+- Docker Engine with Compose v2. IPv6 networks need Docker 27+ (or
+  `"ipv6": true` / `"ip6tables": true` in `daemon.json` on older versions).
 - Traefik running on the host network, with the Docker provider enabled and a
   `websecure` entrypoint that serves a (wildcard) default TLS certificate
   covering `DOMAIN`. This stack does not define a certificate resolver.
@@ -56,10 +59,11 @@ Volumes:
    - `DATA_MOUNT_TYPE`, `DATA_MOUNT_DEVICE`, `DATA_MOUNT_O` — the data share.
      Files must be owned by `www-data` (`uid=33,gid=33`).
 
-3. Check that `NEXTCLOUD_SUBNET` does not overlap any existing Docker network:
+3. Check that the `*_NETWORK_SUBNET_*` ranges don't overlap your LAN or any
+   existing Docker network:
 
    ```sh
-   docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $(docker network ls -q)
+   docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' $(docker network ls -q)
    ```
 
 4. Validate and start:
@@ -95,11 +99,12 @@ All settings are in `.env`; see `.env.example` for the full list with comments.
 
 | Variable                                | Default            | Description                                   |
 |-----------------------------------------|--------------------|-----------------------------------------------|
-| `NEXTCLOUD_VERSION`                     | `35`               | Image tag for both `nextcloud` and `cron`     |
+| `NEXTCLOUD_VERSION`                     | `35.0.1-apache`    | Image tag for both `nextcloud` and `cron`     |
 | `POSTGRES_TAG`                          | `18.6-alpine`      | Postgres image tag                            |
-| `REDIS_TAG`                             | `8-alpine`         | Redis image tag                               |
+| `REDIS_TAG`                             | `8.10-alpine3.23`  | Redis image tag                               |
 | `POSTGRES_DB` / `POSTGRES_USER`         | `nextcloud`        | Database name and user                        |
-| `NEXTCLOUD_SUBNET` / `NEXTCLOUD_GATEWAY`| `172.20.0.0/16` / `172.20.0.1` | Frontend network; gateway is the trusted proxy |
+| `NEXTCLOUD_NETWORK_SUBNET_V4` / `NEXTCLOUD_NETWORK_SUBNET_V6` | `10.100.0.0/24` / `fd00:100:0::/64` | Frontend network; both are trusted proxies |
+| `BACKEND_NETWORK_SUBNET_V4` / `BACKEND_NETWORK_SUBNET_V6` | `10.100.1.0/24` / `fd00:100:1::/64` | Internal backend network |
 | `IPV4_ALLOWLIST` / `IPV6_ALLOWLIST`     | `0.0.0.0/0` / `::/0` | Source ranges allowed by Traefik            |
 | `PHP_MEMORY_LIMIT`                      | `1G`               | PHP memory limit per request                  |
 | `PHP_UPLOAD_LIMIT`                      | `16G`              | Max upload size                               |

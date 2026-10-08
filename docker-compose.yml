@@ -32,8 +32,8 @@ services:
       OVERWRITEPROTOCOL: https
       OVERWRITEHOST: "${DOMAIN}"
       OVERWRITECLIURL: "https://${DOMAIN}"
-      # Host-network Traefik connects from this network's gateway (pinned below).
-      TRUSTED_PROXIES: "${NEXTCLOUD_GATEWAY:-172.20.0.1}"
+      # Host-network Traefik connects from the frontend network's gateways.
+      TRUSTED_PROXIES: "${NEXTCLOUD_NETWORK_SUBNET_V4:-10.100.0.0/24} ${NEXTCLOUD_NETWORK_SUBNET_V6:-fd00:100:0::/64}"
     secrets:
       - postgres-db
       - postgres-user
@@ -244,13 +244,19 @@ configs:
 networks:
   nextcloud:
     name: nextcloud
+    enable_ipv6: true
     ipam:
       config:
-        - subnet: ${NEXTCLOUD_SUBNET:-172.20.0.0/16}
-          gateway: ${NEXTCLOUD_GATEWAY:-172.20.0.1}
+        - subnet: ${NEXTCLOUD_NETWORK_SUBNET_V4:-10.100.0.0/24}
+        - subnet: ${NEXTCLOUD_NETWORK_SUBNET_V6:-fd00:100:0::/64}
   backend:
     name: nextcloud-backend
     internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${BACKEND_NETWORK_SUBNET_V4:-10.100.1.0/24}
+        - subnet: ${BACKEND_NETWORK_SUBNET_V6:-fd00:100:1::/64}
 
 volumes:
   html:
